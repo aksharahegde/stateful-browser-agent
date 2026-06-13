@@ -5,15 +5,19 @@
   "scripts": {
     "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
-    "types": "wrangler types"
+    "types": "wrangler types",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "agents": "^0.0.97",
-    "@cloudflare/puppeteer": "^1.1.0"
+    "@cloudflare/puppeteer": "^1.1.0",
+    "agents": "^0.0.97"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.15",
     "@cloudflare/workers-types": "^4.20250620.0",
     "typescript": "^5.8.3",
+    "vitest": "^4.1.8",
     "wrangler": "^4.0.0"
   },
   "allowScripts": {
