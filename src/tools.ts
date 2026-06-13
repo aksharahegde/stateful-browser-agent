@@ -117,12 +117,25 @@ type PageLike = {
   waitForNavigation: (opts?: object) => Promise<unknown>;
   goto: (url: string, opts?: object) => Promise<unknown>;
   evaluate: (fn: unknown, ...args: unknown[]) => Promise<unknown>;
+  url: () => string;
 };
 
-export async function executeToolCall(page: PageLike, toolCall: ToolCall): Promise<ToolResult> {
+export async function executeToolCall(
+  page: PageLike,
+  toolCall: ToolCall,
+  isUrlSafe?: (url: string) => boolean
+): Promise<ToolResult> {
   switch (toolCall.tool) {
     case "fill": {
       try {
+        // Clear existing value before typing to avoid appending to existing content.
+        await page.evaluate(
+          (sel) => {
+            const el = document.querySelector(sel) as HTMLInputElement | null;
+            if (el) el.value = "";
+          },
+          toolCall.args.target
+        );
         await page.type(toolCall.args.target, toolCall.args.value, { delay: 50 });
         return { result: "success" };
       } catch {
@@ -134,6 +147,12 @@ export async function executeToolCall(page: PageLike, toolCall: ToolCall): Promi
       try {
         await page.click(toolCall.args.target);
         if (toolCall.args.reobserve) {
+          if (isUrlSafe) {
+            const currentUrl = page.url();
+            if (!isUrlSafe(currentUrl)) {
+              return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
+            }
+          }
           const observation = await snapshotPage(page);
           return { result: "success", observation };
         }
@@ -146,7 +165,25 @@ export async function executeToolCall(page: PageLike, toolCall: ToolCall): Promi
 
     case "select": {
       try {
-        await page.select(toolCall.args.target, toolCall.args.value);
+        // page.select() needs the HTML value attribute, not display text.
+        // Look up the matching option by text or value, fall back to raw input.
+        const optionValue = await page.evaluate(
+          (sel, text) => {
+            const el = document.querySelector(sel) as HTMLSelectElement | null;
+            if (!el) return null;
+            const opt = Array.from(el.options).find(
+              (o) => o.text.trim() === text || o.value === text
+            );
+            return opt ? opt.value : null;
+          },
+          toolCall.args.target,
+          toolCall.args.value
+        ) as string | null;
+
+        if (optionValue === null) {
+          return { result: "error", message: `Option '${toolCall.args.value}' not found in ${toolCall.args.target}` };
+        }
+        await page.select(toolCall.args.target, optionValue);
         return { result: "success" };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -171,8 +208,16 @@ export async function executeToolCall(page: PageLike, toolCall: ToolCall): Promi
     case "submit": {
       try {
         const selector = toolCall.args.target ?? "form";
-        await page.$eval(selector, (el) => (el as HTMLFormElement).submit());
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {}),
+          page.$eval(selector, (el) => (el as HTMLFormElement).submit()),
+        ]);
+        if (isUrlSafe) {
+          const currentUrl = page.url();
+          if (!isUrlSafe(currentUrl)) {
+            return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
+          }
+        }
         const observation = await snapshotPage(page);
         return { result: "success", observation };
       } catch (err) {

@@ -130,7 +130,7 @@ export class AgentSession extends Agent<Env, AgentState> {
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolResult = await executeToolCall(page as any, toolCall);
+        const toolResult = await executeToolCall(page as any, toolCall, isSafeUrl);
 
         const resultPayload = JSON.stringify({
           result: toolResult.result,

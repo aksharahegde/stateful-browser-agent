@@ -129,6 +129,7 @@ describe("executeToolCall", () => {
       $eval: vi.fn().mockResolvedValue(undefined),
       waitForNavigation: vi.fn().mockResolvedValue(undefined),
       goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue("https://example.com"),
       evaluate: vi.fn()
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce("page text"),
@@ -170,12 +171,24 @@ describe("executeToolCall", () => {
     expect(result.observation).toContain("=== Interactive Elements ===");
   });
 
-  it("select: calls page.select with target and value", async () => {
-    const page = makeMockPage();
+  it("select: calls page.select with the resolved HTML value attribute", async () => {
+    const page = makeMockPage({
+      evaluate: vi.fn().mockResolvedValueOnce("US"),
+    });
     const tc: ToolCall = { tool: "select", args: { target: "#country", value: "United States" } };
     const result = await executeToolCall(page as any, tc);
-    expect(page.select).toHaveBeenCalledWith("#country", "United States");
+    expect(page.select).toHaveBeenCalledWith("#country", "US");
     expect(result.result).toBe("success");
+  });
+
+  it("select: returns error when option not found", async () => {
+    const page = makeMockPage({
+      evaluate: vi.fn().mockResolvedValueOnce(null),
+    });
+    const tc: ToolCall = { tool: "select", args: { target: "#country", value: "Atlantis" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(result.result).toBe("error");
+    expect(result.message).toContain("Atlantis");
   });
 
   it("hover: calls page.hover with target", async () => {
