@@ -115,3 +115,119 @@ describe("snapshotPage", () => {
     expect(result).toContain('"US"');
   });
 });
+
+import { executeToolCall } from "../src/tools";
+import type { ToolCall } from "../src/prompts";
+
+describe("executeToolCall", () => {
+  function makeMockPage(overrides: Record<string, unknown> = {}) {
+    return {
+      type: vi.fn().mockResolvedValue(undefined),
+      click: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockResolvedValue(["option"]),
+      hover: vi.fn().mockResolvedValue(undefined),
+      $eval: vi.fn().mockResolvedValue(undefined),
+      waitForNavigation: vi.fn().mockResolvedValue(undefined),
+      goto: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce("page text"),
+      ...overrides,
+    };
+  }
+
+  it("fill: calls page.type with target and value", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "fill", args: { target: "#email", value: "user@example.com" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.type).toHaveBeenCalledWith("#email", "user@example.com", { delay: 50 });
+    expect(result.result).toBe("success");
+  });
+
+  it("fill: returns error when page.type throws", async () => {
+    const page = makeMockPage({ type: vi.fn().mockRejectedValue(new Error("not found")) });
+    const tc: ToolCall = { tool: "fill", args: { target: "#missing", value: "x" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(result.result).toBe("error");
+    expect(result.message).toContain("#missing");
+  });
+
+  it("click: calls page.click with target", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "click", args: { target: ".btn" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.click).toHaveBeenCalledWith(".btn");
+    expect(result.result).toBe("success");
+    expect(result.observation).toBeUndefined();
+  });
+
+  it("click: includes observation when reobserve=true", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "click", args: { target: ".btn", reobserve: true } };
+    const result = await executeToolCall(page as any, tc);
+    expect(result.result).toBe("success");
+    expect(result.observation).toBeDefined();
+    expect(result.observation).toContain("=== Interactive Elements ===");
+  });
+
+  it("select: calls page.select with target and value", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "select", args: { target: "#country", value: "United States" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.select).toHaveBeenCalledWith("#country", "United States");
+    expect(result.result).toBe("success");
+  });
+
+  it("hover: calls page.hover with target", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "hover", args: { target: ".menu" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.hover).toHaveBeenCalledWith(".menu");
+    expect(result.result).toBe("success");
+  });
+
+  it("hover: includes observation when reobserve=true", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "hover", args: { target: ".menu", reobserve: true } };
+    const result = await executeToolCall(page as any, tc);
+    expect(result.result).toBe("success");
+    expect(result.observation).toBeDefined();
+    expect(result.observation).toContain("=== Interactive Elements ===");
+  });
+
+  it("submit: calls page.$eval on the target form", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "submit", args: { target: "form#login" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.$eval).toHaveBeenCalledWith("form#login", expect.any(Function));
+    expect(result.result).toBe("success");
+    expect(result.observation).toContain("=== Interactive Elements ===");
+  });
+
+  it("submit: defaults to 'form' selector when target omitted", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "submit", args: {} };
+    await executeToolCall(page as any, tc);
+    expect(page.$eval).toHaveBeenCalledWith("form", expect.any(Function));
+  });
+
+  it("navigate: calls page.goto and returns observation", async () => {
+    const page = makeMockPage();
+    const tc: ToolCall = { tool: "navigate", args: { url: "https://example.com" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(page.goto).toHaveBeenCalledWith("https://example.com", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    expect(result.result).toBe("success");
+    expect(result.observation).toContain("=== Interactive Elements ===");
+  });
+
+  it("navigate: returns error when goto throws", async () => {
+    const page = makeMockPage({ goto: vi.fn().mockRejectedValue(new Error("timeout")) });
+    const tc: ToolCall = { tool: "navigate", args: { url: "https://example.com" } };
+    const result = await executeToolCall(page as any, tc);
+    expect(result.result).toBe("error");
+    expect(result.message).toContain("[Navigation failed]");
+  });
+});

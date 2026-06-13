@@ -1,26 +1,4 @@
-import puppeteer from "@cloudflare/puppeteer";
-
-export async function navigateAndExtract(
-  browser: Awaited<ReturnType<typeof puppeteer.launch>>,
-  url: string
-): Promise<string> {
-  const page = await browser.newPage();
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    const raw = await page.evaluate("document.body.innerText") as string;
-    const cleaned = raw.trim().replace(/\n{3,}/g, "\n\n");
-    return truncate(cleaned, 8000);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return `[Navigation failed] ${url}: ${message}`;
-  } finally {
-    try {
-      await page.close();
-    } catch {
-      // Page may already be closed after a navigation error.
-    }
-  }
-}
+import type { ToolCall } from "./prompts";
 
 export function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
@@ -122,6 +100,101 @@ export async function snapshotPage(
   const pageText = truncate(raw.trim().replace(/\n{3,}/g, "\n\n"), 3000);
 
   return `=== Interactive Elements ===\n${lines}\n\n=== Page Content ===\n${pageText}`;
+}
+
+export type ToolResult = {
+  result: "success" | "error";
+  message?: string;
+  observation?: string;
+};
+
+type PageLike = {
+  type: (selector: string, text: string, opts?: object) => Promise<void>;
+  click: (selector: string) => Promise<void>;
+  select: (selector: string, value: string) => Promise<string[]>;
+  hover: (selector: string) => Promise<void>;
+  $eval: (selector: string, fn: (el: Element) => void) => Promise<void>;
+  waitForNavigation: (opts?: object) => Promise<unknown>;
+  goto: (url: string, opts?: object) => Promise<unknown>;
+  evaluate: (fn: unknown, ...args: unknown[]) => Promise<unknown>;
+};
+
+export async function executeToolCall(page: PageLike, toolCall: ToolCall): Promise<ToolResult> {
+  switch (toolCall.tool) {
+    case "fill": {
+      try {
+        await page.type(toolCall.args.target, toolCall.args.value, { delay: 50 });
+        return { result: "success" };
+      } catch {
+        return { result: "error", message: `Element not found: ${toolCall.args.target}` };
+      }
+    }
+
+    case "click": {
+      try {
+        await page.click(toolCall.args.target);
+        if (toolCall.args.reobserve) {
+          const observation = await snapshotPage(page);
+          return { result: "success", observation };
+        }
+        return { result: "success" };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { result: "error", message: `Click failed on ${toolCall.args.target}: ${msg}` };
+      }
+    }
+
+    case "select": {
+      try {
+        await page.select(toolCall.args.target, toolCall.args.value);
+        return { result: "success" };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { result: "error", message: `Select failed on ${toolCall.args.target}: ${msg}` };
+      }
+    }
+
+    case "hover": {
+      try {
+        await page.hover(toolCall.args.target);
+        if (toolCall.args.reobserve) {
+          const observation = await snapshotPage(page);
+          return { result: "success", observation };
+        }
+        return { result: "success" };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { result: "error", message: `Hover failed on ${toolCall.args.target}: ${msg}` };
+      }
+    }
+
+    case "submit": {
+      try {
+        const selector = toolCall.args.target ?? "form";
+        await page.$eval(selector, (el) => (el as HTMLFormElement).submit());
+        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+        const observation = await snapshotPage(page);
+        return { result: "success", observation };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { result: "error", message: `Submit failed: ${msg}` };
+      }
+    }
+
+    case "navigate": {
+      try {
+        await page.goto(toolCall.args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const observation = await snapshotPage(page);
+        return { result: "success", observation };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { result: "error", message: `[Navigation failed] ${toolCall.args.url}: ${msg}` };
+      }
+    }
+
+    default:
+      return { result: "error", message: "Unknown tool" };
+  }
 }
 
 export function buildSearchUrl(query: string): string {
