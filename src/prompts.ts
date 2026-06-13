@@ -29,6 +29,9 @@ Rules:
 - Use "navigate" when you need to visit a URL to make progress toward the goal
 - Use "extract" when the current page has the information needed but you want to note it before continuing
 - Use "done" when you have enough information to fully answer the goal; include a complete summary
+- If search results or the current page already contain enough information, use "done" immediately
+- Prefer article, docs, and help pages over marketing homepages
+- If an observation starts with "[Navigation failed]", do not retry the same URL; use "done" with prior observations
 - Do not revisit URLs you have already visited
 - Do not loop — if you cannot make progress, use "done" with whatever you have found
 - Your entire response must be valid JSON with no additional text, markdown, or explanation`;
