@@ -17,9 +17,6 @@ export class AgentSession extends Agent<Env, AgentState> {
     status: "idle",
   };
 
-  // Called by Worker via stub.fetch()
-  // Handles: POST /run, GET /status
-  // Returns SSE stream for /run, JSON for /status
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -33,7 +30,6 @@ export class AgentSession extends Agent<Env, AgentState> {
       const { readable, writable } = new TransformStream<string, string>();
       const writer = writable.getWriter();
 
-      // Start agent loop in background — DO keeps running as long as the response stream is open
       this.ctx.waitUntil(
         this.agentLoop(goal, writer)
           .catch(async (err) => {
@@ -55,7 +51,6 @@ export class AgentSession extends Agent<Env, AgentState> {
     return new Response("Not Found", { status: 404 });
   }
 
-  // Starts the agent loop and streams SSE events to the writer
   private async agentLoop(goal: string, writer: WritableStreamDefaultWriter<string>): Promise<void> {
     const MAX_STEPS = 10;
 
@@ -103,7 +98,6 @@ export class AgentSession extends Agent<Env, AgentState> {
         }
       }
 
-      // Max steps reached
       this.setState({ ...this.state, status: "done" });
       await emit({ type: "done", summary: "Max steps reached. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? "") });
 
@@ -112,21 +106,20 @@ export class AgentSession extends Agent<Env, AgentState> {
     }
   }
 
-  // Calls Workers AI to decide the next action
   private async think(goal: string, steps: Step[], observation: string): Promise<Decision> {
     const messages = [
       { role: "system" as const, content: buildSystemPrompt() },
       { role: "user" as const, content: buildDecisionPrompt(goal, steps, observation) },
     ];
 
-    // Try up to 2 times on JSON parse failure
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages,
         response_format: { type: "json_object" },
       });
 
-      const text = typeof result === "string" ? result : (result as { response?: string }).response ?? "";
+      const output = result as Ai_Cf_Meta_Llama_3_3_70B_Instruct_Fp8_Fast_Output;
+      const text = typeof output === "string" ? output : ("response" in output ? (output.response ?? "") : "");
 
       try {
         const decision = JSON.parse(text) as Decision;
@@ -138,7 +131,6 @@ export class AgentSession extends Agent<Env, AgentState> {
       }
     }
 
-    // Fallback: done with whatever we have
     return { action: "done", summary: observation.slice(0, 500) };
   }
 }
