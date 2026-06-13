@@ -1,5 +1,6 @@
 export { AgentSession } from "./agent";
 import { requireApiKey } from "./auth";
+import { resolveCorsHeaders } from "./cors";
 import { sessionIdFromRequest } from "./session";
 
 const HTML = `<!DOCTYPE html>
@@ -12,7 +13,9 @@ const HTML = `<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0d1117; color: #c9d1d9; font-family: 'Courier New', monospace; padding: 20px; }
     h1 { color: #00ff41; margin-bottom: 20px; font-size: 1.4em; }
-    textarea { width: 100%; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 10px; font-family: inherit; font-size: 0.9em; resize: vertical; min-height: 80px; border-radius: 4px; }
+    textarea, input[type="password"] { width: 100%; background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 10px; font-family: inherit; font-size: 0.9em; border-radius: 4px; }
+    textarea { resize: vertical; min-height: 80px; }
+    label { display: block; margin-top: 12px; margin-bottom: 6px; font-size: 0.85em; color: #8b949e; }
     button { margin-top: 10px; background: #238636; color: white; border: none; padding: 8px 20px; cursor: pointer; font-family: inherit; border-radius: 4px; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     #status { margin-left: 12px; font-size: 0.8em; color: #8b949e; }
@@ -25,6 +28,9 @@ const HTML = `<!DOCTYPE html>
 
   <textarea id="goal">Go to the Cloudflare Browser Run documentation and summarize the key capabilities for building AI agents, including any mentioned limitations.</textarea>
 
+  <label for="apiKey">API key</label>
+  <input type="password" id="apiKey" autocomplete="off" placeholder="Required when AGENT_API_KEY is configured" />
+
   <div>
     <button id="runBtn" onclick="runAgent()">Run</button>
     <span id="status">idle</span>
@@ -33,6 +39,16 @@ const HTML = `<!DOCTYPE html>
   <pre id="log"></pre>
 
   <script>
+    const API_KEY_STORAGE = "agentApiKey";
+
+    (function initApiKeyField() {
+      const apiKeyEl = document.getElementById("apiKey");
+      apiKeyEl.value = sessionStorage.getItem(API_KEY_STORAGE) || "";
+      apiKeyEl.addEventListener("input", () => {
+        sessionStorage.setItem(API_KEY_STORAGE, apiKeyEl.value);
+      });
+    })();
+
     function setStatus(text) {
       document.getElementById("status").textContent = text;
     }
@@ -61,7 +77,11 @@ const HTML = `<!DOCTYPE html>
         case "step":
           return "[Step " + data.step + "] navigate → " + data.url;
         case "observe":
-          return "  ↳ Extracted " + data.length + " chars from " + data.url;
+          return "  ↳ Snapshot captured (" + data.length + " chars)";
+        case "tool":
+          return "  🔧 Tool: " + data.tool + " " + JSON.stringify(data.args || {});
+        case "step_result":
+          return "  ↳ Result: " + data.result + (data.message ? " — " + data.message : "");
         case "think":
           return "  🤔 Decision: " + data.action + " " + (data.next_url || "");
         case "done":
@@ -86,14 +106,27 @@ const HTML = `<!DOCTYPE html>
       setStatus("running");
 
       try {
+        const apiKey = document.getElementById("apiKey").value.trim();
+        const headers = { "Content-Type": "application/json" };
+        if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+
         const response = await fetch("/run", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({ goal }),
         });
 
         if (!response.ok) {
-          appendLog("❌ ERROR: HTTP " + response.status + " " + response.statusText, true);
+          if (response.status === 401) {
+            appendLog("❌ ERROR: Unauthorized — enter a valid API key above", true);
+          } else if (response.status === 429) {
+            const retryAfter = response.headers.get("Retry-After");
+            appendLog("❌ ERROR: Rate limited" + (retryAfter ? " — retry after " + retryAfter + "s" : ""), true);
+          } else if (response.status === 409) {
+            appendLog("❌ ERROR: Agent is already running for this session", true);
+          } else {
+            appendLog("❌ ERROR: HTTP " + response.status + " " + response.statusText, true);
+          }
           setStatus("error");
           return;
         }
@@ -135,21 +168,18 @@ const HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-function withCors(doResponse: Response): Response {
-  const headers = new Headers(doResponse.headers);
-  for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
-  return new Response(doResponse.body, { status: doResponse.status, headers });
+function withCors(request: Request, env: Env, response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(resolveCorsHeaders(request, env))) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, { status: response.status, headers });
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const corsHeaders = resolveCorsHeaders(request, env);
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
@@ -166,7 +196,7 @@ export default {
       const authFailure = requireApiKey(request, env, corsHeaders);
       if (authFailure) return authFailure;
 
-      return withCors(await stub.fetch(new Request("https://agent/run", {
+      return withCors(request, env, await stub.fetch(new Request("https://agent/run", {
         method: "POST",
         body: request.body,
         headers: { "Content-Type": request.headers.get("Content-Type") ?? "application/json" },
@@ -177,7 +207,7 @@ export default {
       const authFailure = requireApiKey(request, env, corsHeaders);
       if (authFailure) return authFailure;
 
-      return withCors(await stub.fetch(new Request("https://agent/status")));
+      return withCors(request, env, await stub.fetch(new Request("https://agent/status")));
     }
 
     return new Response("Not Found", { status: 404, headers: corsHeaders });

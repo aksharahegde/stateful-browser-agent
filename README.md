@@ -8,8 +8,8 @@ A stateful Cloudflare Worker that uses [Workers AI](https://developers.cloudflar
 - Tool-call loop: `navigate`, `fill`, `click`, `select`, `hover`, `submit`, `done`
 - Structured page snapshots with interactive element selectors for the LLM
 - Server-Sent Events (SSE) streaming of step-by-step progress
-- Persistent agent state via the `AgentSession` Durable Object (`GET /status`)
-- SSRF protections on navigation (`isSafeUrl` in `src/agent.ts`)
+- Per-session Durable Objects (Bearer token hash or `X-Session-Id`)
+- Optional bearer-token auth, rate limiting, DNS-based SSRF checks, and domain allowlists
 
 ## Architecture
 
@@ -25,7 +25,7 @@ flowchart LR
   AgentDO -->|SSE events| Client
 ```
 
-The Worker routes HTTP requests to a single `AgentSession` Durable Object stub. The agent loop opens one browser page per task, snapshots the DOM, asks the LLM for one tool call per turn, executes it, and feeds results back into message history until the LLM calls `done` or the step limit is reached.
+The Worker derives a session ID from the Bearer token or `X-Session-Id` header, then routes to an `AgentSession` Durable Object. The agent loop opens one browser page per task, validates URLs via DoH before and after navigation, asks the LLM for one tool call per turn, and feeds results back into message history until the LLM calls `done` or the step limit is reached.
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ The Worker routes HTTP requests to a single `AgentSession` Durable Object stub. 
 - A Cloudflare account with **Browser Rendering** and **Workers AI** enabled
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/) authenticated via `wrangler login`
 
-Both the `browser` and `ai` bindings in `wrangler.jsonc` use `"remote": true`, so local development calls Cloudflare's remote Browser Rendering and Workers AI services. No `.dev.vars` secrets are required — the LLM runs through the `AI` binding, not external API keys.
+Both the `browser` and `ai` bindings in `wrangler.jsonc` use `"remote": true`, so local development calls Cloudflare's remote Browser Rendering and Workers AI services.
 
 ## Quick start
 
@@ -47,10 +47,29 @@ npm run types    # wrangler types
 
 After `npm run dev`, open `http://localhost:8787/` (Wrangler's default port), enter a goal, and click **Run**.
 
+### Production secrets and vars
+
+```bash
+# Require Bearer auth on /run and /status
+printf '%s' 'your-secret-key' | npx wrangler secret put AGENT_API_KEY
+
+# Optional: restrict navigable domains (comma-separated suffixes)
+npx wrangler vars set AGENT_ALLOWED_HOST_SUFFIXES "cloudflare.com,duckduckgo.com"
+
+# Optional: restrict CORS to specific origins (comma-separated)
+npx wrangler vars set ALLOWED_ORIGINS "https://your-app.example.com"
+
+# Cooldown between runs per session (default 10000 ms, set in wrangler.jsonc)
+npx wrangler vars set AGENT_RUN_COOLDOWN_MS "10000"
+```
+
+The demo UI stores your API key in `sessionStorage` and sends it as `Authorization: Bearer …` when configured.
+
 ### API example
 
 ```bash
-curl -N -X POST http://localhost:8787/run \
+curl -N -X POST https://stateful-browser-agent.example.workers.dev/run \
+  -H "Authorization: Bearer YOUR_AGENT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"goal":"Summarize Cloudflare Browser Rendering docs"}'
 ```
@@ -66,13 +85,19 @@ The response is a stream of SSE `data:` lines. Use `-N` with curl to disable buf
 | `GET` | `/status` | Current Durable Object state (JSON). |
 | `OPTIONS` | `/*` | CORS preflight (204). |
 
+Auth: when `AGENT_API_KEY` is set, `/run` and `/status` require `Authorization: Bearer <key>`.
+
+Session: each Bearer token maps to an isolated Durable Object. Without auth, pass `X-Session-Id` or fall back to `demo-session`.
+
+Rate limit: returns `429` with `Retry-After` when `AGENT_RUN_COOLDOWN_MS` has not elapsed since the last run.
+
 ### `POST /run` request
 
 ```json
 { "goal": "Go to example.com and describe the homepage" }
 ```
 
-Returns `400` if `goal` is missing or not a non-empty string.
+Returns `400` if `goal` is missing, empty, or over 4096 characters. Returns `409` if a run is already in progress for the session.
 
 ### `GET /status` response
 
@@ -106,8 +131,6 @@ Each event is a JSON object on a `data:` line:
 | `step_result` | `{ result, message? }` | Tool execution result (`success` or `error`) |
 | `done` | `{ summary }` | Task finished |
 | `error` | `{ message }` | Hard stop (unsafe URL, blocked navigation, etc.) |
-
-**Demo session note:** The Worker currently routes all requests to a fixed Durable Object name (`demo-session`). For production, derive the session ID from an authenticated principal (see TODO in `src/index.ts`).
 
 ## Tool protocol
 
@@ -148,14 +171,19 @@ For snapshot format, selector priority, and error-handling tables, see the [desi
 
 ```
 src/
-  index.ts    Worker routing, CORS, demo UI
-  agent.ts    AgentSession Durable Object and agent loop
-  tools.ts    Page snapshots, tool execution, URL inference
-  prompts.ts  System prompt and message history builders
-test/         Vitest unit tests (prompts, tools, routing)
+  index.ts      Worker routing, CORS, demo UI
+  agent.ts      AgentSession Durable Object and agent loop
+  tools.ts      Page snapshots, tool execution, URL inference
+  prompts.ts    System prompt and message history builders
+  urlSafety.ts  Hostname checks and DoH IP validation
+  auth.ts       Bearer token gate for /run and /status
+  session.ts    Session ID derivation for Durable Object routing
+  rateLimit.ts  Per-session run cooldown
+  cors.ts       Optional ALLOWED_ORIGINS handling
+test/           Vitest unit tests
 docs/superpowers/
-  specs/      Design specifications
-  plans/      Implementation plans
+  specs/        Design specifications
+  plans/        Implementation plans
 wrangler.jsonc  Worker, Browser, AI, and Durable Object bindings
 ```
 
@@ -171,14 +199,16 @@ wrangler.jsonc  Worker, Browser, AI, and Durable Object bindings
 
 **Security:**
 
-- Navigation is restricted to HTTPS URLs that pass `isSafeUrl` (blocks localhost, private IP ranges, link-local, and cloud metadata hosts).
-- Hostname-regex checks can be bypassed via DNS rebinding or redirect chains; production deployments should resolve hostnames via DoH and validate every returned IP.
-- Post-navigation redirect checks are applied in `executeToolCall` for the `navigate` tool.
+- URLs must pass synchronous hostname checks and DoH resolution (private/link-local IPs blocked).
+- Optional `AGENT_ALLOWED_HOST_SUFFIXES` restricts navigable domains.
+- Post-navigation URL checks run after initial load and every browser action that may change the page URL.
+- Set `AGENT_API_KEY` in production. Use `ALLOWED_ORIGINS` to avoid wildcard CORS on API routes.
+- Page content is untrusted input to the LLM; treat prompt injection from visited sites as a residual risk.
 
 **Operational:**
 
-- Session IDs should be tied to authenticated users, not a shared demo name.
 - The demo UI is inline HTML in `src/index.ts`, served at `/`.
+- Each authenticated caller gets an isolated Durable Object session via hashed Bearer token.
 
 ## Related docs
 
