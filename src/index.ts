@@ -8,6 +8,12 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+function withCors(doResponse: Response): Response {
+  const headers = new Headers(doResponse.headers);
+  for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+  return new Response(doResponse.body, { status: doResponse.status, headers });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -16,41 +22,22 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    const id = env.AGENT_SESSION.idFromName("demo-session");
-    const stub = env.AGENT_SESSION.get(id);
+    const stub = env.AGENT_SESSION.get(env.AGENT_SESSION.idFromName("demo-session"));
 
     if (request.method === "GET" && url.pathname === "/") {
-      return new Response(HTML, {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
-      });
+      return new Response(HTML, { headers: { ...corsHeaders, "Content-Type": "text/html" } });
     }
 
     if (request.method === "POST" && url.pathname === "/run") {
-      const doResponse = await stub.fetch(new Request("https://agent/run", {
+      return withCors(await stub.fetch(new Request("https://agent/run", {
         method: "POST",
         body: request.body,
-        headers: { "Content-Type": "application/json" },
-      }));
-      const responseHeaders = new Headers(doResponse.headers);
-      for (const [key, value] of Object.entries(corsHeaders)) {
-        responseHeaders.set(key, value);
-      }
-      return new Response(doResponse.body, {
-        status: doResponse.status,
-        headers: responseHeaders,
-      });
+        headers: { "Content-Type": request.headers.get("Content-Type") ?? "application/json" },
+      })));
     }
 
     if (request.method === "GET" && url.pathname === "/status") {
-      const doResponse = await stub.fetch(new Request("https://agent/status"));
-      const responseHeaders = new Headers(doResponse.headers);
-      for (const [key, value] of Object.entries(corsHeaders)) {
-        responseHeaders.set(key, value);
-      }
-      return new Response(doResponse.body, {
-        status: doResponse.status,
-        headers: responseHeaders,
-      });
+      return withCors(await stub.fetch(new Request("https://agent/status")));
     }
 
     return new Response("Not Found", { status: 404, headers: corsHeaders });
