@@ -1,7 +1,7 @@
 import { Agent } from "agents";
 import puppeteer from "@cloudflare/puppeteer";
-import { buildSystemPrompt, buildDecisionPrompt, type Step, type Decision } from "./prompts";
-import { navigateAndExtract, inferStartUrl } from "./tools";
+import { buildMessages, type Step, type ToolCall, type HistoryEntry } from "./prompts";
+import { snapshotPage, executeToolCall, inferStartUrl } from "./tools";
 
 // Blocks RFC1918, loopback, link-local, and cloud metadata endpoints to prevent SSRF.
 // NOTE(production): hostname-regex checks can be bypassed via DNS rebinding or redirect
@@ -83,7 +83,7 @@ export class AgentSession extends Agent<Env, AgentState> {
   }
 
   private async agentLoop(goal: string, writer: WritableStreamDefaultWriter<string>): Promise<void> {
-    const MAX_STEPS = 10;
+    const MAX_STEPS = 30;
 
     const emit = async (event: Record<string, unknown>) => {
       await writer.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -92,79 +92,91 @@ export class AgentSession extends Agent<Env, AgentState> {
     this.setState({ goal, steps: [], status: "running" });
     await emit({ type: "start", goal });
 
-    let currentUrl = inferStartUrl(goal);
-    if (!isSafeUrl(currentUrl)) {
-      await emit({ type: "error", message: `Blocked unsafe start URL: ${currentUrl}` });
+    const startUrl = inferStartUrl(goal);
+    if (!isSafeUrl(startUrl)) {
+      await emit({ type: "error", message: `Blocked unsafe start URL: ${startUrl}` });
       this.setState({ ...this.state, status: "error" });
       return;
     }
-    await emit({ type: "plan", url: currentUrl });
+    await emit({ type: "plan", url: startUrl });
     await emit({ type: "launching" });
 
     const browser = await puppeteer.launch(this.env.BROWSER);
+    const page = await browser.newPage();
+
     try {
-      let observation = "";
+      await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let firstObservation = await snapshotPage(page as any);
+      await emit({ type: "observe", length: firstObservation.length });
+
+      const history: HistoryEntry[] = [];
       const steps: Step[] = [];
 
       for (let i = 0; i < MAX_STEPS; i++) {
-        await emit({ type: "step", step: i + 1, action: "navigate", url: currentUrl });
+        const toolCall = await this.decide(goal, firstObservation, history);
+        await emit({ type: "tool", tool: toolCall.tool, args: "args" in toolCall ? toolCall.args : {} });
 
-        observation = await navigateAndExtract(browser, currentUrl);
+        if (toolCall.tool === "done") {
+          this.setState({ ...this.state, status: "done", finalSummary: toolCall.args.summary });
+          await emit({ type: "done", summary: toolCall.args.summary });
+          return;
+        }
 
-        await emit({ type: "observe", url: currentUrl, length: observation.length });
+        if (toolCall.tool === "navigate" && !isSafeUrl(toolCall.args.url)) {
+          await emit({ type: "error", message: `Blocked unsafe URL: ${toolCall.args.url}` });
+          this.setState({ ...this.state, status: "error" });
+          return;
+        }
 
-        const decision = await this.think(goal, steps, observation);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toolResult = await executeToolCall(page as any, toolCall);
+
+        const resultPayload = JSON.stringify({
+          result: toolResult.result,
+          ...(toolResult.message ? { message: toolResult.message } : {}),
+        });
+        const historyResult = toolResult.observation
+          ? `${resultPayload}\n\n${toolResult.observation}`
+          : resultPayload;
+
+        history.push({ toolCall, result: historyResult });
+
+        if (toolResult.observation) {
+          firstObservation = toolResult.observation;
+        }
 
         const step: Step = {
-          action: `${decision.action}${decision.next_url ? ` → ${decision.next_url}` : ""}`,
-          observation,
+          action: formatStepAction(toolCall),
+          observation: toolResult.observation?.slice(0, 200) ?? firstObservation.slice(0, 200),
           timestamp: Date.now(),
+          toolResult: { result: toolResult.result, message: toolResult.message },
         };
         steps.push(step);
         this.setState({ ...this.state, steps });
 
-        await emit({ type: "think", action: decision.action, next_url: decision.next_url });
-
-        if (decision.action === "done") {
-          this.setState({ ...this.state, status: "done", finalSummary: decision.summary });
-          await emit({ type: "done", summary: decision.summary });
-          return;
-        }
-
-        if (decision.action === "extract") {
-          // Observation already recorded; stay on current page and let LLM decide next step.
-        } else if (decision.next_url) {
-          if (!isSafeUrl(decision.next_url)) {
-            await emit({ type: "error", message: `Blocked unsafe URL: ${decision.next_url}` });
-            this.setState({ ...this.state, status: "error" });
-            return;
-          }
-          currentUrl = decision.next_url;
-        } else {
-          // navigate with no URL — cannot make progress
-          this.setState({ ...this.state, status: "done" });
-          await emit({ type: "done", summary: "Agent could not determine next URL. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? "") });
-          return;
-        }
+        await emit({ type: "step_result", result: toolResult.result, message: toolResult.message });
       }
 
       this.setState({ ...this.state, status: "done" });
-      await emit({ type: "done", summary: "Max steps reached. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? "") });
+      await emit({
+        type: "done",
+        summary: "Max steps reached. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? ""),
+      });
 
     } finally {
-      try {
-        await browser.close();
-      } catch {
-        // Browser may already be disconnected after a navigation error.
-      }
+      try { await page.close(); } catch {}
+      try { await browser.close(); } catch {}
     }
   }
 
-  private async think(goal: string, steps: Step[], observation: string): Promise<Decision> {
-    const messages = [
-      { role: "system" as const, content: buildSystemPrompt() },
-      { role: "user" as const, content: buildDecisionPrompt(goal, steps, observation) },
-    ];
+  private async decide(
+    goal: string,
+    firstObservation: string,
+    history: HistoryEntry[]
+  ): Promise<ToolCall> {
+    const messages = buildMessages(goal, firstObservation, history);
+    const validTools = ["navigate", "fill", "click", "select", "hover", "submit", "done"];
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
@@ -176,15 +188,27 @@ export class AgentSession extends Agent<Env, AgentState> {
       const text = typeof output === "string" ? output : ("response" in output ? (output.response ?? "") : "");
 
       try {
-        const decision = JSON.parse(text) as Decision;
-        if (decision.action === "navigate" || decision.action === "extract" || decision.action === "done") {
-          return decision;
+        const toolCall = JSON.parse(text) as ToolCall;
+        if (validTools.includes(toolCall.tool)) {
+          return toolCall;
         }
       } catch {
         // retry
       }
     }
 
-    return { action: "done", summary: observation.slice(0, 500) };
+    return { tool: "done", args: { summary: "Could not parse LLM response. " + firstObservation.slice(0, 500) } };
+  }
+}
+
+function formatStepAction(toolCall: ToolCall): string {
+  switch (toolCall.tool) {
+    case "navigate": return `navigate → ${toolCall.args.url}`;
+    case "fill":     return `fill "${toolCall.args.value}" → ${toolCall.args.target}`;
+    case "click":    return `click ${toolCall.args.label ?? toolCall.args.target}`;
+    case "select":   return `select "${toolCall.args.value}" in ${toolCall.args.target}`;
+    case "hover":    return `hover ${toolCall.args.label ?? toolCall.args.target}`;
+    case "submit":   return `submit ${toolCall.args.target ?? "form"}`;
+    case "done":     return "done";
   }
 }
