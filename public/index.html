@@ -1,6 +1,4 @@
-export { AgentSession } from "./agent";
-
-const HTML = `<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -40,10 +38,10 @@ const HTML = `<!DOCTYPE html>
       if (isError) {
         const span = document.createElement("span");
         span.className = "error";
-        span.textContent = text + "\\n";
+        span.textContent = text + "\n";
         log.appendChild(span);
       } else {
-        log.appendChild(document.createTextNode(text + "\\n"));
+        log.appendChild(document.createTextNode(text + "\n"));
       }
       log.scrollTop = log.scrollHeight;
     }
@@ -59,7 +57,7 @@ const HTML = `<!DOCTYPE html>
         case "think":
           return "  🤔 Decision: " + data.action + " " + (data.next_url || "");
         case "done":
-          return "\\n✅ DONE\\n" + data.summary;
+          return "\n✅ DONE\n" + data.summary;
         case "error":
           return "❌ ERROR: " + data.message;
         default:
@@ -100,7 +98,7 @@ const HTML = `<!DOCTYPE html>
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\\n");
+          const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           for (const line of lines) {
             if (line.startsWith("data: ")) {
@@ -127,46 +125,4 @@ const HTML = `<!DOCTYPE html>
     }
   </script>
 </body>
-</html>`;
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
-function withCors(doResponse: Response): Response {
-  const headers = new Headers(doResponse.headers);
-  for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
-  return new Response(doResponse.body, { status: doResponse.status, headers });
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
-    }
-
-    const stub = env.AGENT_SESSION.get(env.AGENT_SESSION.idFromName("demo-session"));
-
-    if (request.method === "GET" && url.pathname === "/") {
-      return new Response(HTML, { headers: { ...corsHeaders, "Content-Type": "text/html" } });
-    }
-
-    if (request.method === "POST" && url.pathname === "/run") {
-      return withCors(await stub.fetch(new Request("https://agent/run", {
-        method: "POST",
-        body: request.body,
-        headers: { "Content-Type": request.headers.get("Content-Type") ?? "application/json" },
-      })));
-    }
-
-    if (request.method === "GET" && url.pathname === "/status") {
-      return withCors(await stub.fetch(new Request("https://agent/status")));
-    }
-
-    return new Response("Not Found", { status: 404, headers: corsHeaders });
-  },
-} satisfies ExportedHandler<Env>;
+</html>
