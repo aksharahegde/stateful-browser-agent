@@ -171,6 +171,17 @@ describe("executeToolCall", () => {
     expect(result.observation).toContain("=== Interactive Elements ===");
   });
 
+  it("click: blocks navigation to unsafe URL", async () => {
+    const page = makeMockPage({
+      url: vi.fn().mockReturnValue("https://169.254.169.254/"),
+    });
+    const isUrlSafe = (url: string) => url === "https://example.com";
+    const tc: ToolCall = { tool: "click", args: { target: ".btn" } };
+    const result = await executeToolCall(page as any, tc, isUrlSafe);
+    expect(result.result).toBe("error");
+    expect(result.message).toContain("Navigation blocked");
+  });
+
   it("select: calls page.select with the resolved HTML value attribute", async () => {
     const page = makeMockPage({
       evaluate: vi.fn().mockResolvedValueOnce("US"),

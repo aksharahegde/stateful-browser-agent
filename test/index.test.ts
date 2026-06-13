@@ -69,4 +69,29 @@ describe("Worker routing", () => {
     expect(res.status).toBe(404);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
+
+  it("POST /run returns 401 when AGENT_API_KEY is set and Authorization is missing", async () => {
+    const req = new Request("https://worker.example/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal: "test goal" }),
+    });
+    const env = { ...mockEnv, AGENT_API_KEY: "secret" } as unknown as Env;
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /run succeeds when AGENT_API_KEY matches Authorization", async () => {
+    const req = new Request("https://worker.example/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer secret",
+      },
+      body: JSON.stringify({ goal: "test goal" }),
+    });
+    const env = { ...mockEnv, AGENT_API_KEY: "secret" } as unknown as Env;
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+  });
 });

@@ -2,32 +2,7 @@ import { Agent } from "agents";
 import puppeteer from "@cloudflare/puppeteer";
 import { buildMessages, type Step, type ToolCall, type HistoryEntry } from "./prompts";
 import { snapshotPage, executeToolCall, inferStartUrl } from "./tools";
-
-// Blocks RFC1918, loopback, link-local, and cloud metadata endpoints to prevent SSRF.
-// NOTE(production): hostname-regex checks can be bypassed via DNS rebinding or redirect
-// chains. In production, resolve the hostname via DoH and validate every returned IP.
-function isSafeUrl(raw: string): boolean {
-  let parsed: URL;
-  try { parsed = new URL(raw); } catch { return false; }
-  if (parsed.protocol !== "https:") return false;
-  const host = parsed.hostname.toLowerCase();
-  const privatePatterns = [
-    /^localhost$/,
-    /^127\./,
-    /^0\.0\.0\.0$/,
-    /^10\./,
-    /^172\.(1[6-9]|2\d|3[01])\./,
-    /^192\.168\./,
-    /^169\.254\./,        // link-local / cloud metadata (AWS, GCP, Azure)
-    /^::1$/,
-    /^::$/,
-    /^0:0:0:0:0:0:0:1$/, // expanded loopback
-    /^::ffff:/,           // IPv4-mapped IPv6
-    /^fc00:/,
-    /^fd[0-9a-f]{2}:/i,  // IPv6 ULA (fd00::/8)
-  ];
-  return !privatePatterns.some((re) => re.test(host));
-}
+import { isSafeUrl, unsafeUrlMessage } from "./urlSafety";
 
 type AgentState = {
   goal: string;
@@ -51,11 +26,20 @@ export class AgentSession extends Agent<Env, AgentState> {
     }
 
     if (request.method === "POST" && url.pathname === "/run") {
+      if (this.state.status === "running") {
+        return new Response("Agent is already running", { status: 409 });
+      }
+
       const body = await request.json<{ goal?: unknown }>();
       if (typeof body.goal !== "string" || !body.goal.trim()) {
         return new Response("Missing or invalid goal", { status: 400 });
       }
-      const goal = body.goal;
+      const goal = body.goal.trim();
+      if (goal.length > 4096) {
+        return new Response("Goal exceeds maximum length of 4096 characters", { status: 400 });
+      }
+
+      this.setState({ goal, steps: [], status: "running" });
 
       const { readable, writable } = new TransformStream<string, string>();
       const writer = writable.getWriter();
@@ -89,7 +73,6 @@ export class AgentSession extends Agent<Env, AgentState> {
       await writer.write(`data: ${JSON.stringify(event)}\n\n`);
     };
 
-    this.setState({ goal, steps: [], status: "running" });
     await emit({ type: "start", goal });
 
     const startUrl = inferStartUrl(goal);
@@ -106,6 +89,12 @@ export class AgentSession extends Agent<Env, AgentState> {
 
     try {
       await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      const initialUrl = page.url();
+      if (!isSafeUrl(initialUrl)) {
+        await emit({ type: "error", message: unsafeUrlMessage(initialUrl, "Blocked URL after redirect") });
+        this.setState({ ...this.state, status: "error" });
+        return;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let firstObservation = await snapshotPage(page as any);
       await emit({ type: "observe", length: firstObservation.length });

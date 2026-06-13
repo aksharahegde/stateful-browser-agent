@@ -120,6 +120,18 @@ type PageLike = {
   url: () => string;
 };
 
+function blockedNavigation(
+  page: PageLike,
+  isUrlSafe?: (url: string) => boolean
+): ToolResult | null {
+  if (!isUrlSafe) return null;
+  const currentUrl = page.url();
+  if (!isUrlSafe(currentUrl)) {
+    return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
+  }
+  return null;
+}
+
 export async function executeToolCall(
   page: PageLike,
   toolCall: ToolCall,
@@ -146,13 +158,9 @@ export async function executeToolCall(
     case "click": {
       try {
         await page.click(toolCall.args.target);
+        const blocked = blockedNavigation(page, isUrlSafe);
+        if (blocked) return blocked;
         if (toolCall.args.reobserve) {
-          if (isUrlSafe) {
-            const currentUrl = page.url();
-            if (!isUrlSafe(currentUrl)) {
-              return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
-            }
-          }
           const observation = await snapshotPage(page);
           return { result: "success", observation };
         }
@@ -194,6 +202,8 @@ export async function executeToolCall(
     case "hover": {
       try {
         await page.hover(toolCall.args.target);
+        const blocked = blockedNavigation(page, isUrlSafe);
+        if (blocked) return blocked;
         if (toolCall.args.reobserve) {
           const observation = await snapshotPage(page);
           return { result: "success", observation };
@@ -212,12 +222,8 @@ export async function executeToolCall(
           page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {}),
           page.$eval(selector, (el) => (el as HTMLFormElement).submit()),
         ]);
-        if (isUrlSafe) {
-          const currentUrl = page.url();
-          if (!isUrlSafe(currentUrl)) {
-            return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
-          }
-        }
+        const blocked = blockedNavigation(page, isUrlSafe);
+        if (blocked) return blocked;
         const observation = await snapshotPage(page);
         return { result: "success", observation };
       } catch (err) {
@@ -229,13 +235,8 @@ export async function executeToolCall(
     case "navigate": {
       try {
         await page.goto(toolCall.args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-        // Check final URL after navigation to catch redirect-based SSRF bypasses.
-        if (isUrlSafe) {
-          const finalUrl = page.url();
-          if (!isUrlSafe(finalUrl)) {
-            return { result: "error", message: `Navigation blocked: redirected to unsafe URL ${finalUrl}` };
-          }
-        }
+        const blocked = blockedNavigation(page, isUrlSafe);
+        if (blocked) return blocked;
         const observation = await snapshotPage(page);
         return { result: "success", observation };
       } catch (err) {
