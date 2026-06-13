@@ -1,7 +1,7 @@
 import { Agent } from "agents";
 import puppeteer from "@cloudflare/puppeteer";
 import { buildSystemPrompt, buildDecisionPrompt, type Step, type Decision } from "./prompts";
-import { navigateAndExtract } from "./tools";
+import { navigateAndExtract, inferStartUrl } from "./tools";
 
 // Blocks RFC1918, loopback, link-local, and cloud metadata endpoints to prevent SSRF.
 // NOTE(production): hostname-regex checks can be bypassed via DNS rebinding or redirect
@@ -24,7 +24,7 @@ function isSafeUrl(raw: string): boolean {
     /^0:0:0:0:0:0:0:1$/, // expanded loopback
     /^::ffff:/,           // IPv4-mapped IPv6
     /^fc00:/,
-    /^fd/,
+    /^fd[0-9a-f]{2}:/i,  // IPv6 ULA (fd00::/8)
   ];
   return !privatePatterns.some((re) => re.test(host));
 }
@@ -51,7 +51,11 @@ export class AgentSession extends Agent<Env, AgentState> {
     }
 
     if (request.method === "POST" && url.pathname === "/run") {
-      const { goal } = await request.json<{ goal: string }>();
+      const body = await request.json<{ goal?: unknown }>();
+      if (typeof body.goal !== "string" || !body.goal.trim()) {
+        return new Response("Missing or invalid goal", { status: 400 });
+      }
+      const goal = body.goal;
 
       const { readable, writable } = new TransformStream<string, string>();
       const writer = writable.getWriter();
@@ -81,17 +85,24 @@ export class AgentSession extends Agent<Env, AgentState> {
   private async agentLoop(goal: string, writer: WritableStreamDefaultWriter<string>): Promise<void> {
     const MAX_STEPS = 10;
 
-    this.setState({ goal, steps: [], status: "running" });
-
     const emit = async (event: Record<string, unknown>) => {
       await writer.write(`data: ${JSON.stringify(event)}\n\n`);
     };
 
+    this.setState({ goal, steps: [], status: "running" });
     await emit({ type: "start", goal });
+
+    let currentUrl = inferStartUrl(goal);
+    if (!isSafeUrl(currentUrl)) {
+      await emit({ type: "error", message: `Blocked unsafe start URL: ${currentUrl}` });
+      this.setState({ ...this.state, status: "error" });
+      return;
+    }
+    await emit({ type: "plan", url: currentUrl });
+    await emit({ type: "launching" });
 
     const browser = await puppeteer.launch(this.env.BROWSER);
     try {
-      let currentUrl = "https://developers.cloudflare.com/browser-rendering/";
       let observation = "";
       const steps: Step[] = [];
 
@@ -120,13 +131,20 @@ export class AgentSession extends Agent<Env, AgentState> {
           return;
         }
 
-        if (decision.next_url) {
+        if (decision.action === "extract") {
+          // Observation already recorded; stay on current page and let LLM decide next step.
+        } else if (decision.next_url) {
           if (!isSafeUrl(decision.next_url)) {
             await emit({ type: "error", message: `Blocked unsafe URL: ${decision.next_url}` });
             this.setState({ ...this.state, status: "error" });
             return;
           }
           currentUrl = decision.next_url;
+        } else {
+          // navigate with no URL — cannot make progress
+          this.setState({ ...this.state, status: "done" });
+          await emit({ type: "done", summary: "Agent could not determine next URL. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? "") });
+          return;
         }
       }
 
@@ -134,7 +152,11 @@ export class AgentSession extends Agent<Env, AgentState> {
       await emit({ type: "done", summary: "Max steps reached. " + (steps[steps.length - 1]?.observation.slice(0, 500) ?? "") });
 
     } finally {
-      await browser.close();
+      try {
+        await browser.close();
+      } catch {
+        // Browser may already be disconnected after a navigation error.
+      }
     }
   }
 
