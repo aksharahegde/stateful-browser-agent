@@ -29,6 +29,7 @@ export class AgentSession extends Agent<Env, AgentState> {
 
       const { readable, writable } = new TransformStream<string, string>();
       const writer = writable.getWriter();
+      const encoded = readable.pipeThrough(new TextEncoderStream());
 
       this.ctx.waitUntil(
         this.agentLoop(goal, writer)
@@ -39,7 +40,7 @@ export class AgentSession extends Agent<Env, AgentState> {
           .finally(() => writer.close())
       );
 
-      return new Response(readable, {
+      return new Response(encoded, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",

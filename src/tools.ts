@@ -7,7 +7,7 @@ export async function navigateAndExtract(
   const page = await browser.newPage();
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    const raw = await page.evaluate(() => document.body.innerText);
+    const raw = await page.evaluate("document.body.innerText") as string;
     const cleaned = raw.trim().replace(/\n{3,}/g, "\n\n");
     return truncate(cleaned, 8000);
   } finally {
