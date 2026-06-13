@@ -4,6 +4,8 @@ import { buildSystemPrompt, buildDecisionPrompt, type Step, type Decision } from
 import { navigateAndExtract } from "./tools";
 
 // Blocks RFC1918, loopback, link-local, and cloud metadata endpoints to prevent SSRF.
+// NOTE(production): hostname-regex checks can be bypassed via DNS rebinding or redirect
+// chains. In production, resolve the hostname via DoH and validate every returned IP.
 function isSafeUrl(raw: string): boolean {
   let parsed: URL;
   try { parsed = new URL(raw); } catch { return false; }
@@ -12,11 +14,15 @@ function isSafeUrl(raw: string): boolean {
   const privatePatterns = [
     /^localhost$/,
     /^127\./,
+    /^0\.0\.0\.0$/,
     /^10\./,
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
-    /^169\.254\./,   // link-local / cloud metadata (AWS, GCP, Azure)
+    /^169\.254\./,        // link-local / cloud metadata (AWS, GCP, Azure)
     /^::1$/,
+    /^::$/,
+    /^0:0:0:0:0:0:0:1$/, // expanded loopback
+    /^::ffff:/,           // IPv4-mapped IPv6
     /^fc00:/,
     /^fd/,
   ];
