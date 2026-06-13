@@ -2,13 +2,15 @@ import { Agent } from "agents";
 import puppeteer from "@cloudflare/puppeteer";
 import { buildMessages, type Step, type ToolCall, type HistoryEntry } from "./prompts";
 import { snapshotPage, executeToolCall, inferStartUrl } from "./tools";
-import { isSafeUrl, unsafeUrlMessage } from "./urlSafety";
+import { validateSafeUrl, unsafeUrlMessage, type UrlSafetyOptions } from "./urlSafety";
+import { isRateLimited, retryAfterSeconds, runCooldownMs } from "./rateLimit";
 
 type AgentState = {
   goal: string;
   steps: Step[];
   status: "idle" | "running" | "done" | "error";
   finalSummary?: string;
+  lastRunAt?: number;
 };
 
 export class AgentSession extends Agent<Env, AgentState> {
@@ -30,6 +32,15 @@ export class AgentSession extends Agent<Env, AgentState> {
         return new Response("Agent is already running", { status: 409 });
       }
 
+      const cooldownMs = runCooldownMs(this.env);
+      if (isRateLimited(this.state.lastRunAt, cooldownMs)) {
+        const retryAfter = retryAfterSeconds(this.state.lastRunAt!, cooldownMs);
+        return new Response("Rate limit exceeded", {
+          status: 429,
+          headers: { "Retry-After": String(retryAfter) },
+        });
+      }
+
       const body = await request.json<{ goal?: unknown }>();
       if (typeof body.goal !== "string" || !body.goal.trim()) {
         return new Response("Missing or invalid goal", { status: 400 });
@@ -39,7 +50,7 @@ export class AgentSession extends Agent<Env, AgentState> {
         return new Response("Goal exceeds maximum length of 4096 characters", { status: 400 });
       }
 
-      this.setState({ goal, steps: [], status: "running" });
+      this.setState({ goal, steps: [], status: "running", lastRunAt: Date.now() });
 
       const { readable, writable } = new TransformStream<string, string>();
       const writer = writable.getWriter();
@@ -75,8 +86,13 @@ export class AgentSession extends Agent<Env, AgentState> {
 
     await emit({ type: "start", goal });
 
+    const urlSafety: UrlSafetyOptions = {
+      allowedHostSuffixes: this.env.AGENT_ALLOWED_HOST_SUFFIXES,
+    };
+    const isUrlAllowed = (target: string) => validateSafeUrl(target, urlSafety);
+
     const startUrl = inferStartUrl(goal);
-    if (!isSafeUrl(startUrl)) {
+    if (!(await isUrlAllowed(startUrl))) {
       await emit({ type: "error", message: `Blocked unsafe start URL: ${startUrl}` });
       this.setState({ ...this.state, status: "error" });
       return;
@@ -90,7 +106,7 @@ export class AgentSession extends Agent<Env, AgentState> {
     try {
       await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
       const initialUrl = page.url();
-      if (!isSafeUrl(initialUrl)) {
+      if (!(await isUrlAllowed(initialUrl))) {
         await emit({ type: "error", message: unsafeUrlMessage(initialUrl, "Blocked URL after redirect") });
         this.setState({ ...this.state, status: "error" });
         return;
@@ -112,14 +128,14 @@ export class AgentSession extends Agent<Env, AgentState> {
           return;
         }
 
-        if (toolCall.tool === "navigate" && !isSafeUrl(toolCall.args.url)) {
+        if (toolCall.tool === "navigate" && !(await isUrlAllowed(toolCall.args.url))) {
           await emit({ type: "error", message: `Blocked unsafe URL: ${toolCall.args.url}` });
           this.setState({ ...this.state, status: "error" });
           return;
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolResult = await executeToolCall(page as any, toolCall, isSafeUrl);
+        const toolResult = await executeToolCall(page as any, toolCall, isUrlAllowed);
 
         const resultPayload = JSON.stringify({
           result: toolResult.result,

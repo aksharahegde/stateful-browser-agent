@@ -28,5 +28,8 @@
   ],
   "observability": {
     "enabled": true
+  },
+  "vars": {
+    "AGENT_RUN_COOLDOWN_MS": "10000"
   }
 }
