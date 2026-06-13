@@ -229,6 +229,13 @@ export async function executeToolCall(
     case "navigate": {
       try {
         await page.goto(toolCall.args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        // Check final URL after navigation to catch redirect-based SSRF bypasses.
+        if (isUrlSafe) {
+          const finalUrl = page.url();
+          if (!isUrlSafe(finalUrl)) {
+            return { result: "error", message: `Navigation blocked: redirected to unsafe URL ${finalUrl}` };
+          }
+        }
         const observation = await snapshotPage(page);
         return { result: "success", observation };
       } catch (err) {
