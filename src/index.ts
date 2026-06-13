@@ -52,6 +52,10 @@ const HTML = `<!DOCTYPE html>
       switch (data.type) {
         case "start":
           return "▶ Starting: " + data.goal;
+        case "plan":
+          return "📍 Starting URL: " + data.url;
+        case "launching":
+          return "🌐 Launching browser...";
         case "step":
           return "[Step " + data.step + "] navigate → " + data.url;
         case "observe":
