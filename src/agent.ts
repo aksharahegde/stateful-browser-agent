@@ -3,6 +3,26 @@ import puppeteer from "@cloudflare/puppeteer";
 import { buildSystemPrompt, buildDecisionPrompt, type Step, type Decision } from "./prompts";
 import { navigateAndExtract } from "./tools";
 
+// Blocks RFC1918, loopback, link-local, and cloud metadata endpoints to prevent SSRF.
+function isSafeUrl(raw: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch { return false; }
+  if (parsed.protocol !== "https:") return false;
+  const host = parsed.hostname.toLowerCase();
+  const privatePatterns = [
+    /^localhost$/,
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,   // link-local / cloud metadata (AWS, GCP, Azure)
+    /^::1$/,
+    /^fc00:/,
+    /^fd/,
+  ];
+  return !privatePatterns.some((re) => re.test(host));
+}
+
 type AgentState = {
   goal: string;
   steps: Step[];
@@ -95,6 +115,11 @@ export class AgentSession extends Agent<Env, AgentState> {
         }
 
         if (decision.next_url) {
+          if (!isSafeUrl(decision.next_url)) {
+            await emit({ type: "error", message: `Blocked unsafe URL: ${decision.next_url}` });
+            this.setState({ ...this.state, status: "error" });
+            return;
+          }
           currentUrl = decision.next_url;
         }
       }

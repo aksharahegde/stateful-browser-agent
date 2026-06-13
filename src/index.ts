@@ -149,6 +149,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    // TODO(production): derive session ID from an authenticated principal rather than a fixed name.
     const stub = env.AGENT_SESSION.get(env.AGENT_SESSION.idFromName("demo-session"));
 
     if (request.method === "GET" && url.pathname === "/") {
