@@ -58,3 +58,60 @@ describe("inferStartUrl", () => {
     );
   });
 });
+
+import { vi } from "vitest";
+import { snapshotPage } from "../src/tools";
+
+describe("snapshotPage", () => {
+  it("returns a string containing both sections", async () => {
+    const mockPage = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([
+          { kind: "input", label: "Email", selector: "#email", type: "email", value: "" },
+          { kind: "button", label: "Sign In", selector: "button[type=submit]" },
+        ])
+        .mockResolvedValueOnce("Welcome back. Sign in to your account."),
+    };
+    const result = await snapshotPage(mockPage as any);
+    expect(result).toContain("=== Interactive Elements ===");
+    expect(result).toContain('label="Email"');
+    expect(result).toContain('selector="#email"');
+    expect(result).toContain("=== Page Content ===");
+    expect(result).toContain("Welcome back");
+  });
+
+  it("truncates page content to 3000 chars", async () => {
+    const mockPage = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce("z".repeat(4000)),
+    };
+    const result = await snapshotPage(mockPage as any);
+    expect(result).toContain("z".repeat(3000));
+    expect(result).not.toContain("z".repeat(3001));
+  });
+
+  it("includes type and value for input elements", async () => {
+    const mockPage = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([
+          { kind: "input", label: "Password", selector: "#pwd", type: "password", value: "" },
+        ])
+        .mockResolvedValueOnce(""),
+    };
+    const result = await snapshotPage(mockPage as any);
+    expect(result).toContain("type=password");
+  });
+
+  it("includes options for select elements", async () => {
+    const mockPage = {
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([
+          { kind: "select", label: "Country", selector: "#country", options: ["US", "UK", "CA"] },
+        ])
+        .mockResolvedValueOnce(""),
+    };
+    const result = await snapshotPage(mockPage as any);
+    expect(result).toContain('"US"');
+  });
+});
