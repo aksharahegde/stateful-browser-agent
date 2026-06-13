@@ -120,13 +120,16 @@ type PageLike = {
   url: () => string;
 };
 
-function blockedNavigation(
+type UrlValidator = (url: string) => boolean | Promise<boolean>;
+
+async function blockedNavigation(
   page: PageLike,
-  isUrlSafe?: (url: string) => boolean
-): ToolResult | null {
+  isUrlSafe?: UrlValidator
+): Promise<ToolResult | null> {
   if (!isUrlSafe) return null;
   const currentUrl = page.url();
-  if (!isUrlSafe(currentUrl)) {
+  const allowed = await isUrlSafe(currentUrl);
+  if (!allowed) {
     return { result: "error", message: `Navigation blocked: unsafe URL ${currentUrl}` };
   }
   return null;
@@ -135,7 +138,7 @@ function blockedNavigation(
 export async function executeToolCall(
   page: PageLike,
   toolCall: ToolCall,
-  isUrlSafe?: (url: string) => boolean
+  isUrlSafe?: UrlValidator
 ): Promise<ToolResult> {
   switch (toolCall.tool) {
     case "fill": {
@@ -158,7 +161,7 @@ export async function executeToolCall(
     case "click": {
       try {
         await page.click(toolCall.args.target);
-        const blocked = blockedNavigation(page, isUrlSafe);
+        const blocked = await blockedNavigation(page, isUrlSafe);
         if (blocked) return blocked;
         if (toolCall.args.reobserve) {
           const observation = await snapshotPage(page);
@@ -202,7 +205,7 @@ export async function executeToolCall(
     case "hover": {
       try {
         await page.hover(toolCall.args.target);
-        const blocked = blockedNavigation(page, isUrlSafe);
+        const blocked = await blockedNavigation(page, isUrlSafe);
         if (blocked) return blocked;
         if (toolCall.args.reobserve) {
           const observation = await snapshotPage(page);
@@ -222,7 +225,7 @@ export async function executeToolCall(
           page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {}),
           page.$eval(selector, (el) => (el as HTMLFormElement).submit()),
         ]);
-        const blocked = blockedNavigation(page, isUrlSafe);
+        const blocked = await blockedNavigation(page, isUrlSafe);
         if (blocked) return blocked;
         const observation = await snapshotPage(page);
         return { result: "success", observation };
@@ -235,7 +238,7 @@ export async function executeToolCall(
     case "navigate": {
       try {
         await page.goto(toolCall.args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-        const blocked = blockedNavigation(page, isUrlSafe);
+        const blocked = await blockedNavigation(page, isUrlSafe);
         if (blocked) return blocked;
         const observation = await snapshotPage(page);
         return { result: "success", observation };

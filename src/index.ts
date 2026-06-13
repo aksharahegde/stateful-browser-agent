@@ -1,5 +1,6 @@
 export { AgentSession } from "./agent";
 import { requireApiKey } from "./auth";
+import { sessionIdFromRequest } from "./session";
 
 const HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -154,8 +155,8 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // TODO(production): derive session ID from an authenticated principal rather than a fixed name.
-    const stub = env.AGENT_SESSION.get(env.AGENT_SESSION.idFromName("demo-session"));
+    const sessionId = await sessionIdFromRequest(request, env);
+    const stub = env.AGENT_SESSION.get(env.AGENT_SESSION.idFromName(sessionId));
 
     if (request.method === "GET" && url.pathname === "/") {
       return new Response(HTML, { headers: { ...corsHeaders, "Content-Type": "text/html" } });
