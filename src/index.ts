@@ -1,4 +1,5 @@
 export { AgentSession } from "./agent";
+import { requireApiKey } from "./auth";
 
 const HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -136,7 +137,7 @@ const HTML = `<!DOCTYPE html>
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
 function withCors(doResponse: Response): Response {
@@ -161,6 +162,9 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/run") {
+      const authFailure = requireApiKey(request, env, corsHeaders);
+      if (authFailure) return authFailure;
+
       return withCors(await stub.fetch(new Request("https://agent/run", {
         method: "POST",
         body: request.body,
@@ -169,6 +173,9 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/status") {
+      const authFailure = requireApiKey(request, env, corsHeaders);
+      if (authFailure) return authFailure;
+
       return withCors(await stub.fetch(new Request("https://agent/status")));
     }
 
