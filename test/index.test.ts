@@ -38,6 +38,7 @@ describe("Worker routing", () => {
     expect(res.headers.get("Content-Type")).toContain("text/html");
     const body = await res.text();
     expect(body).toContain("Stateful Browser Agent");
+    expect(body).toContain('id="apiKey"');
   });
 
   it("POST /run proxies to DO and returns SSE with CORS", async () => {
