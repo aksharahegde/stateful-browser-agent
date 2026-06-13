@@ -178,6 +178,24 @@ export class AgentSession extends Agent<Env, AgentState> {
     const messages = buildMessages(goal, firstObservation, history);
     const validTools = ["navigate", "fill", "click", "select", "hover", "submit", "done"];
 
+    function hasRequiredArgs(tc: unknown): tc is ToolCall {
+      if (typeof tc !== "object" || tc === null) return false;
+      const c = tc as Record<string, unknown>;
+      if (typeof c.tool !== "string" || !validTools.includes(c.tool)) return false;
+      const args = c.args as Record<string, unknown> | undefined;
+      if (typeof args !== "object" || args === null) return false;
+      switch (c.tool) {
+        case "navigate": return typeof args.url === "string";
+        case "fill":     return typeof args.target === "string" && typeof args.value === "string";
+        case "click":    return typeof args.target === "string";
+        case "select":   return typeof args.target === "string" && typeof args.value === "string";
+        case "hover":    return typeof args.target === "string";
+        case "submit":   return true; // target is optional
+        case "done":     return typeof args.summary === "string";
+        default:         return false;
+      }
+    }
+
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages,
@@ -188,9 +206,9 @@ export class AgentSession extends Agent<Env, AgentState> {
       const text = typeof output === "string" ? output : ("response" in output ? (output.response ?? "") : "");
 
       try {
-        const toolCall = JSON.parse(text) as ToolCall;
-        if (validTools.includes(toolCall.tool)) {
-          return toolCall;
+        const parsed: unknown = JSON.parse(text);
+        if (hasRequiredArgs(parsed)) {
+          return parsed;
         }
       } catch {
         // retry
